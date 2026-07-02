@@ -1,0 +1,71 @@
+#pragma once
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+struct IDirect3D8;
+struct IDirect3DDevice8;
+struct IDirect3DBaseTexture8;
+struct D3DPRESENT_PARAMETERS;
+
+typedef enum _D3DDEVTYPE {
+    D3DDEVTYPE_HAL = 1,
+    D3DDEVTYPE_REF = 2,
+    D3DDEVTYPE_SW = 3
+} D3DDEVTYPE;
+
+typedef enum _D3DPRIMITIVETYPE {
+    D3DPT_POINTLIST = 1,
+    D3DPT_LINELIST = 2,
+    D3DPT_LINESTRIP = 3,
+    D3DPT_TRIANGLELIST = 4,
+    D3DPT_TRIANGLESTRIP = 5,
+    D3DPT_TRIANGLEFAN = 6
+} D3DPRIMITIVETYPE;
+
+typedef enum _D3DSTATEBLOCKTYPE {
+    D3DSBT_ALL = 1,
+    D3DSBT_PIXELSTATE = 2,
+    D3DSBT_VERTEXSTATE = 3
+} D3DSTATEBLOCKTYPE;
+
+typedef enum _D3DRENDERSTATETYPE {
+    D3DRS_ZENABLE = 7,
+    D3DRS_ZWRITEENABLE = 14,
+    D3DRS_SRCBLEND = 19,
+    D3DRS_DESTBLEND = 20,
+    D3DRS_CULLMODE = 22,
+    D3DRS_ALPHABLENDENABLE = 27,
+    D3DRS_LIGHTING = 137
+} D3DRENDERSTATETYPE;
+
+typedef enum _D3DTEXTURESTAGESTATETYPE {
+    D3DTSS_COLOROP = 1,
+    D3DTSS_COLORARG1 = 2,
+    D3DTSS_ALPHAOP = 4,
+    D3DTSS_ALPHAARG1 = 5
+} D3DTEXTURESTAGESTATETYPE;
+
+typedef struct _D3DVIEWPORT8 {
+    DWORD X;
+    DWORD Y;
+    DWORD Width;
+    DWORD Height;
+    float MinZ;
+    float MaxZ;
+} D3DVIEWPORT8;
+
+static constexpr DWORD D3DZB_FALSE = 0;
+static constexpr DWORD D3DCULL_NONE = 1;
+static constexpr DWORD D3DBLEND_SRCALPHA = 5;
+static constexpr DWORD D3DBLEND_INVSRCALPHA = 6;
+static constexpr DWORD D3DTOP_SELECTARG1 = 2;
+static constexpr DWORD D3DTA_DIFFUSE = 0;
+static constexpr DWORD D3DFVF_XYZRHW = 0x00000004;
+static constexpr DWORD D3DFVF_DIFFUSE = 0x00000040;
+
