@@ -26,32 +26,24 @@ From PowerShell:
 .\build.ps1
 ```
 
-By default, the script builds a 32-bit ASI plugin and installs it to:
-
-```text
-..\..\Hitman 2 Silent Assassin\scripts\h2_stats_overlay.asi
-```
-
-To build without installing:
-
-```powershell
-.\build.ps1 -NoInstall
-```
-
-The local build output is written to:
+The script builds a 32-bit ASI plugin and writes it to:
 
 ```text
 build\Release\h2_stats_overlay.asi
 ```
 
+The build does not touch the game installation.
+
 ## Install
 
-If you do not use the automatic install step, copy these files into the game's `scripts` directory:
+Copy these files manually into the game's `scripts` directory (for the Steam release, `<Steam>\steamapps\common\Hitman 2 Silent Assassin\scripts`):
 
 ```text
 h2_stats_overlay.asi
 h2_stats_overlay.ini
 ```
+
+The game must be closed while replacing the ASI, otherwise the copy fails because the file is loaded.
 
 The plugin also creates `h2_stats_overlay.log` beside the ASI when debug logging is enabled.
 

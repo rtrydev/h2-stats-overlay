@@ -1,16 +1,8 @@
-param(
-    [switch]$NoInstall
-)
-
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RepoRoot = Split-Path -Parent (Split-Path -Parent $ProjectRoot)
 $BuildDir = Join-Path $ProjectRoot "build\Release"
-$GameScriptsDir = Join-Path $RepoRoot "Hitman 2 Silent Assassin\scripts"
 $OutputAsi = Join-Path $BuildDir "h2_stats_overlay.asi"
-$InstalledAsi = Join-Path $GameScriptsDir "h2_stats_overlay.asi"
-$InstalledIni = Join-Path $GameScriptsDir "h2_stats_overlay.ini"
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
@@ -52,16 +44,5 @@ if ($LASTEXITCODE -ne 0) {
     throw "Build failed with exit code $LASTEXITCODE."
 }
 
-if (-not $NoInstall) {
-    New-Item -ItemType Directory -Force -Path $GameScriptsDir | Out-Null
-    Copy-Item -LiteralPath $OutputAsi -Destination $InstalledAsi -Force
-    if (-not (Test-Path -LiteralPath $InstalledIni)) {
-        Copy-Item -LiteralPath (Join-Path $ProjectRoot "h2_stats_overlay.ini") -Destination $InstalledIni
-    }
-    Write-Host "Installed:"
-    Write-Host "  $InstalledAsi"
-    Write-Host "  $InstalledIni"
-} else {
-    Write-Host "Built:"
-    Write-Host "  $OutputAsi"
-}
+Write-Host "Built:"
+Write-Host "  $OutputAsi"
