@@ -14,9 +14,7 @@ struct StatCounters {
 };
 
 struct StatsSnapshot {
-    bool missionActive = false;
     bool missionStarted = false;
-    bool countersComplete = false;
     int missionNumber = 0;
     int missionTime = 0;
     char missionKey[9] = {};

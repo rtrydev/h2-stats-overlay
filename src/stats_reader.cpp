@@ -6,7 +6,6 @@
 
 #include <cstdint>
 #include <cstring>
-#include <vector>
 
 namespace h2stats::StatsReader {
 namespace {
@@ -19,6 +18,23 @@ constexpr int kSecondOffsets[] = {
     0xF50, 0x8D4, 0x9EC, 0x400, 0x9EC,
     0x644, 0xB08, 0x96C, 0xB00, 0x8
 };
+
+// Offsets inside the per-mission stats struct (resolved via base+0x2A6C50).
+constexpr int kStatHeadshots = 0x208;
+constexpr int kStatEnemiesHarmed = 0x20C;
+constexpr int kStatEnemiesKilled = 0x210;
+constexpr int kStatInnocentsHarmed = 0x214;
+constexpr int kStatInnocentsKilled = 0x218;
+constexpr int kStatAlerts = 0x21C;
+constexpr int kStatCloseEncounters = 0x220;
+constexpr int kStatPlayerEntityId = 0x94;
+
+// Offsets inside the player entity. The statistics screen (statisticsscreen.cpp)
+// reads shots fired from [player+0x11C7] and adds [player+0x11CB] to the
+// mission struct's close encounter counter. Both values are serialized with
+// the player entity, so they survive save loads.
+constexpr int kPlayerShotsFired = 0x11C7;
+constexpr int kPlayerCloseEncounters = 0x11CB;
 
 struct MissionInfo {
     const char key[9];
@@ -52,16 +68,6 @@ constexpr MissionInfo kMissions[] = {
 DWORD g_lastReadFailureLogTick = 0;
 DWORD g_lastDegradedReadLogTick = 0;
 char g_lastMissionKey[9] = {};
-
-struct ShotCandidate {
-    uintptr_t address = 0;
-    int initialValue = 0;
-    int lastValue = 0;
-};
-
-std::vector<ShotCandidate> g_shotCandidates;
-int g_dynamicShotValue = 0;
-int g_lastMissionTime = 0;
 
 uintptr_t GameBase() {
     const HMODULE exe = GetModuleHandleA(nullptr);
@@ -151,205 +157,77 @@ bool ReadCounter(uintptr_t base, int missionNumber, int statOffset, int& value) 
     return ReadPointerValue(base + 0x2A6C50, offsets, sizeof(offsets) / sizeof(offsets[0]), value);
 }
 
-bool ReadCounterOrZero(uintptr_t base, int missionNumber, int statOffset, const char* name, int& value) {
+void ReadCounterOrZero(uintptr_t base, int missionNumber, int statOffset, const char* name, int& value) {
     if (ReadCounter(base, missionNumber, statOffset, value)) {
-        return true;
+        return;
     }
 
     value = 0;
     LogDegradedRead(name);
-    return false;
 }
 
-bool TryReadShotsFromMissionState(uintptr_t base, int& value) {
-    const int timeOffsets[] = {0x118, 0xB38, 0x8, 0x1084, 0x24};
-    uintptr_t missionTimeAddress = 0;
-    if (!ResolvePointerAddress(base + 0x2A6C58,
-                               timeOffsets,
-                               sizeof(timeOffsets) / sizeof(timeOffsets[0]),
-                               missionTimeAddress)) {
+// Resolves the player entity through the game's entity registry, the same way
+// the statistics screen does: the mission stats struct stores the player
+// entity id at +0x94, which is looked up in the registry at [[base+0x2A6C5C]+0x98].
+bool ResolvePlayerEntity(uintptr_t base, int missionNumber, uintptr_t& entity) {
+    uint32_t playerId = 0;
+    if (!ReadCounter(base, missionNumber, kStatPlayerEntityId, reinterpret_cast<int&>(playerId)) || playerId == 0) {
         return false;
     }
 
-    int missionTime = 0;
-    if (!ReadValue(missionTimeAddress, missionTime) || missionTime <= 0) {
+    // registry = [[base+0x2A6C5C]+0x98], inner = [registry+0x4]
+    const int innerOffsets[] = {0x98, 0x04};
+    uintptr_t innerAddress = 0;
+    if (!ResolvePointerAddress(base + 0x2A6C5C, innerOffsets, 2, innerAddress)) {
+        return false;
+    }
+    uint32_t inner = 0;
+    if (!ReadValue(innerAddress, inner) || inner == 0) {
         return false;
     }
 
-    // The old shots pointer is stale in current installs, but the live mission timer
-    // owner points to a companion stats panel structure containing the shot counters.
-    if (missionTimeAddress < 0x34) {
-        return false;
-    }
-
-    uint32_t shotTable = 0;
-    if (!ReadValue(missionTimeAddress - 0x30, shotTable) || shotTable == 0) {
-        return false;
-    }
-
-    uint32_t shotStats = 0;
-    if (!ReadValue(static_cast<uintptr_t>(shotTable) + 0x54, shotStats) || shotStats == 0) {
-        return false;
-    }
-
-    int mirroredMissionTime = 0;
-    int shotsA = 0;
-    int shotsB = 0;
-    if (!ReadValue(static_cast<uintptr_t>(shotStats) + 0x24, mirroredMissionTime) ||
-        !ReadValue(static_cast<uintptr_t>(shotStats) + 0x34, shotsA) ||
-        !ReadValue(static_cast<uintptr_t>(shotStats) + 0x38, shotsB)) {
-        return false;
-    }
-
-    const int timeDelta = mirroredMissionTime > missionTime
-                              ? mirroredMissionTime - missionTime
-                              : missionTime - mirroredMissionTime;
-    if (mirroredMissionTime <= 0 || timeDelta > 10) {
-        return false;
-    }
-    if (shotsA < 0 || shotsA > 500 || shotsB < 0 || shotsB > 500) {
-        return false;
-    }
-
-    value = shotsA > shotsB ? shotsA : shotsB;
-    return true;
-}
-
-bool IsReadableMemory(const MEMORY_BASIC_INFORMATION& info) {
-    if (info.State != MEM_COMMIT) {
-        return false;
-    }
-    if ((info.Protect & PAGE_NOACCESS) != 0 || (info.Protect & PAGE_GUARD) != 0) {
-        return false;
-    }
-    return true;
-}
-
-bool LooksLikeShotCounterStruct(const uint8_t* bytes, size_t available) {
-    if (available < 0x50) {
-        return false;
-    }
-
-    const auto readInt = [bytes](size_t offset) {
-        int value = 0;
-        memcpy(&value, bytes + offset, sizeof(value));
-        return value;
-    };
-
-    const int shots = readInt(0x00);
-    if (shots < 0 || shots > 500) {
-        return false;
-    }
-    if (readInt(0x04) != 4 || readInt(0x08) != 17) {
-        return false;
-    }
-    for (size_t offset = 0x0C; offset <= 0x4C; offset += 4) {
-        if (readInt(offset) != 0) {
+    uint32_t node = 0;
+    if ((playerId & 0x40000000u) != 0) {
+        // Pool branch: node = [[inner+0x14]+0x4] + (id & 0x3FFFFFFF)
+        uint32_t pool = 0;
+        if (!ReadValue(static_cast<uintptr_t>(inner) + 0x14, pool) || pool == 0) {
+            return false;
+        }
+        uint32_t poolBase = 0;
+        if (!ReadValue(static_cast<uintptr_t>(pool) + 0x04, poolBase) || poolBase == 0) {
+            return false;
+        }
+        node = poolBase + (playerId & 0x3FFFFFFFu);
+    } else {
+        // Hash branch: node = [[inner+0xC] + (id & [[inner+0x8]+0x10]) * 4]
+        uint32_t hashInfo = 0;
+        if (!ReadValue(static_cast<uintptr_t>(inner) + 0x08, hashInfo) || hashInfo == 0) {
+            return false;
+        }
+        uint32_t mask = 0;
+        if (!ReadValue(static_cast<uintptr_t>(hashInfo) + 0x10, mask)) {
+            return false;
+        }
+        uint32_t table = 0;
+        if (!ReadValue(static_cast<uintptr_t>(inner) + 0x0C, table) || table == 0) {
+            return false;
+        }
+        if (!ReadValue(static_cast<uintptr_t>(table) + static_cast<uintptr_t>(playerId & mask) * 4, node) || node == 0) {
             return false;
         }
     }
-    return true;
-}
 
-void ResetDynamicShots() {
-    g_shotCandidates.clear();
-    g_dynamicShotValue = 0;
-    g_lastMissionTime = 0;
-}
-
-void ScanShotCandidates() {
-    g_shotCandidates.clear();
-
-    uintptr_t address = 0x00400000;
-    constexpr uintptr_t kMaxAddress = 0x30000000;
-
-    while (address < kMaxAddress) {
-        MEMORY_BASIC_INFORMATION info = {};
-        if (VirtualQuery(reinterpret_cast<LPCVOID>(address), &info, sizeof(info)) == 0) {
-            address += 0x10000;
-            continue;
-        }
-
-        const uintptr_t regionBase = reinterpret_cast<uintptr_t>(info.BaseAddress);
-        const uintptr_t regionEnd = regionBase + info.RegionSize;
-        const uintptr_t nextAddress = regionEnd > address ? regionEnd : address + 0x1000;
-
-        if (IsReadableMemory(info) && info.RegionSize <= 64 * 1024 * 1024) {
-            constexpr size_t kChunkSize = 1024 * 1024;
-            for (uintptr_t chunk = regionBase; chunk < regionEnd; chunk += kChunkSize) {
-                const size_t bytesToRead = static_cast<size_t>((regionEnd - chunk) < kChunkSize ? (regionEnd - chunk) : kChunkSize);
-                std::vector<uint8_t> buffer(bytesToRead);
-                SIZE_T bytesRead = 0;
-                if (!ReadProcessMemory(GetCurrentProcess(),
-                                       reinterpret_cast<LPCVOID>(chunk),
-                                       buffer.data(),
-                                       bytesToRead,
-                                       &bytesRead) ||
-                    bytesRead < 0x50) {
-                    continue;
-                }
-
-                const uintptr_t alignedStart = (chunk + 3) & ~static_cast<uintptr_t>(3);
-                for (uintptr_t candidate = alignedStart; candidate + 0x50 <= chunk + bytesRead; candidate += 4) {
-                    const size_t offset = static_cast<size_t>(candidate - chunk);
-                    if (!LooksLikeShotCounterStruct(buffer.data() + offset, bytesRead - offset)) {
-                        continue;
-                    }
-
-                    int value = 0;
-                    memcpy(&value, buffer.data() + offset, sizeof(value));
-                    g_shotCandidates.push_back({candidate, value, value});
-                }
-            }
-        }
-
-        address = nextAddress;
-    }
-
-    Log::Write("Shot counter candidate scan found %u candidates", static_cast<unsigned>(g_shotCandidates.size()));
-}
-
-bool TryReadDynamicShots(int& value) {
-    if (g_shotCandidates.empty()) {
-        ScanShotCandidates();
-    }
-
-    if (g_shotCandidates.empty()) {
+    uint32_t flags = 0;
+    if (!ReadValue(static_cast<uintptr_t>(node) + 0x3C, flags) || (flags & 0x4000000u) != 0) {
         return false;
     }
 
-    int bestDelta = g_dynamicShotValue;
-    uintptr_t bestAddress = 0;
-
-    for (ShotCandidate& candidate : g_shotCandidates) {
-        int current = 0;
-        if (!ReadValue(candidate.address, current) || current < 0 || current > 500) {
-            continue;
-        }
-
-        if (current < candidate.initialValue) {
-            candidate.initialValue = current;
-            candidate.lastValue = current;
-            continue;
-        }
-
-        const int frameDelta = current - candidate.lastValue;
-        if (frameDelta >= 0 && frameDelta <= 10) {
-            const int totalDelta = current - candidate.initialValue;
-            if (totalDelta > bestDelta) {
-                bestDelta = totalDelta;
-                bestAddress = candidate.address;
-            }
-        }
-        candidate.lastValue = current;
+    uint32_t entityPointer = 0;
+    if (!ReadValue(static_cast<uintptr_t>(node) + 0x54, entityPointer) || entityPointer == 0) {
+        return false;
     }
 
-    if (bestDelta > g_dynamicShotValue) {
-        g_dynamicShotValue = bestDelta;
-        Log::Write("Dynamic shots counter advanced to %d using 0x%08X", g_dynamicShotValue, static_cast<unsigned>(bestAddress));
-    }
-
-    value = g_dynamicShotValue;
+    entity = entityPointer;
     return true;
 }
 
@@ -382,13 +260,11 @@ void ReadSnapshot(StatsSnapshot& snapshot) {
         return;
     }
 
-    snapshot.missionActive = true;
     snapshot.missionNumber = mission->number;
     strcpy_s(snapshot.missionName, mission->name);
 
     if (memcmp(g_lastMissionKey, snapshot.missionKey, 8) != 0) {
         memcpy(g_lastMissionKey, snapshot.missionKey, 9);
-        ResetDynamicShots();
         Log::Write("Mission detected: #%d %s (%s)", snapshot.missionNumber, snapshot.missionName, snapshot.missionKey);
     }
 
@@ -405,40 +281,32 @@ void ReadSnapshot(StatsSnapshot& snapshot) {
         return;
     }
 
-    if (g_lastMissionTime > 0 && snapshot.missionTime < g_lastMissionTime) {
-        ResetDynamicShots();
-    }
-    g_lastMissionTime = snapshot.missionTime;
+    ReadCounterOrZero(base, snapshot.missionNumber, kStatCloseEncounters, "close encounters", snapshot.counters.closeEncounters);
+    ReadCounterOrZero(base, snapshot.missionNumber, kStatHeadshots, "headshots", snapshot.counters.headshots);
+    ReadCounterOrZero(base, snapshot.missionNumber, kStatAlerts, "alerts", snapshot.counters.alerts);
+    ReadCounterOrZero(base, snapshot.missionNumber, kStatEnemiesKilled, "enemies killed", snapshot.counters.enemiesKilled);
+    ReadCounterOrZero(base, snapshot.missionNumber, kStatEnemiesHarmed, "enemies harmed", snapshot.counters.enemiesHarmed);
+    ReadCounterOrZero(base, snapshot.missionNumber, kStatInnocentsKilled, "innocents killed", snapshot.counters.innocentsKilled);
+    ReadCounterOrZero(base, snapshot.missionNumber, kStatInnocentsHarmed, "innocents harmed", snapshot.counters.innocentsHarmed);
 
-    bool countersComplete = true;
-    if (!TryReadShotsFromMissionState(base, snapshot.counters.shotsFired)) {
-        const int shotsOffsets[] = {0xBD, 0x11C7};
-        if (!ReadPointerValue(base + 0x39419,
-                              shotsOffsets,
-                              sizeof(shotsOffsets) / sizeof(shotsOffsets[0]),
-                              snapshot.counters.shotsFired)) {
-            if (!TryReadDynamicShots(snapshot.counters.shotsFired)) {
-                snapshot.counters.shotsFired = 0;
-                countersComplete = false;
-                LogDegradedRead("shots fired");
-            }
+    uintptr_t player = 0;
+    if (ResolvePlayerEntity(base, snapshot.missionNumber, player)) {
+        int shots = 0;
+        if (ReadValue(player + kPlayerShotsFired, shots) && shots >= 0 && shots < 100000) {
+            snapshot.counters.shotsFired = shots;
         } else {
-            int dynamicShots = 0;
-            if (TryReadDynamicShots(dynamicShots) && dynamicShots > snapshot.counters.shotsFired) {
-                snapshot.counters.shotsFired = dynamicShots;
-            }
+            LogDegradedRead("shots fired");
         }
+
+        int closeEncounterExtra = 0;
+        if (ReadValue(player + kPlayerCloseEncounters, closeEncounterExtra) &&
+            closeEncounterExtra >= 0 && closeEncounterExtra < 100000) {
+            snapshot.counters.closeEncounters += closeEncounterExtra;
+        }
+    } else {
+        LogDegradedRead("player entity");
     }
 
-    countersComplete = ReadCounterOrZero(base, snapshot.missionNumber, 0x220, "close encounters", snapshot.counters.closeEncounters) && countersComplete;
-    countersComplete = ReadCounterOrZero(base, snapshot.missionNumber, 0x208, "headshots", snapshot.counters.headshots) && countersComplete;
-    countersComplete = ReadCounterOrZero(base, snapshot.missionNumber, 0x21C, "alerts", snapshot.counters.alerts) && countersComplete;
-    countersComplete = ReadCounterOrZero(base, snapshot.missionNumber, 0x210, "enemies killed", snapshot.counters.enemiesKilled) && countersComplete;
-    countersComplete = ReadCounterOrZero(base, snapshot.missionNumber, 0x20C, "enemies harmed", snapshot.counters.enemiesHarmed) && countersComplete;
-    countersComplete = ReadCounterOrZero(base, snapshot.missionNumber, 0x218, "innocents killed", snapshot.counters.innocentsKilled) && countersComplete;
-    countersComplete = ReadCounterOrZero(base, snapshot.missionNumber, 0x214, "innocents harmed", snapshot.counters.innocentsHarmed) && countersComplete;
-
-    snapshot.countersComplete = countersComplete;
     snapshot.missionStarted = true;
 }
 
