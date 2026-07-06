@@ -16,7 +16,7 @@ The overlay uses a built-in pixel font and does not require external assets.
 ## Requirements
 
 - Windows.
-- Hitman 2: Silent Assassin or Hitman: Contracts using Direct3D 8. Hitman 2 tested with the Steam release, version 1.02. Contracts support is experimental (see Compatibility).
+- Hitman 2: Silent Assassin or Hitman: Contracts using Direct3D 8. Hitman 2 tested with the Steam release, version 1.02. Contracts tested with the Steam release (see Compatibility).
 - An ASI loader that loads plugins from the game's `scripts` directory. Tested with Ultimate ASI Loader 9.5.0 installed as `d3d8.dll`.
 - Visual Studio 2022 Community or Build Tools with the v143 C++ toolchain.
 
@@ -86,6 +86,6 @@ Log=1
 
 The Hitman 2 memory offsets were tested against the installed Steam copy of Hitman 2: Silent Assassin, app ID 6850, build ID 251795, with `hitman2.exe` file/product version `1, 0, 0, 277`. The installed ASI loader was Ultimate ASI Loader 9.5.0. Other game versions, executables, or wrappers may require offset updates.
 
-The Hitman: Contracts offsets target the Steam release with `HitmanContracts.exe` file/product version `1, 0, 0, 175` (in-game build 175) and are **experimental / unverified**. In particular, the mission-name pointer is resolved by cycling through eleven candidate pointer chains until one resolves to a known level id (see `kContractsMapPointers` in `src/stats_reader.cpp`). If nothing appears in a mission, or the counters are wrong, the offsets likely need re-finding against your `HitmanContracts.exe` build. Enable `Verbose=1` and `[Debug] Log=1` to watch mission detection in `h2_stats_overlay.log`.
+The Hitman: Contracts offsets were tested against the Steam release with `HitmanContracts.exe` file/product version `1, 0, 0, 175` (in-game build 175): mission detection, the timer, and all counters (including shots fired) read correctly. The mission-name pointer is resolved by cycling through eleven candidate pointer chains until one resolves to a known level id (see `kMapPointers` in `src/game_contracts.cpp`). If nothing appears in a mission on a different game build, the offsets may need re-finding against your `HitmanContracts.exe`. Enable `Verbose=1` and `[Debug] Log=1` to watch mission detection in `h2_stats_overlay.log`.
 
 To install for Contracts, copy `h2_stats_overlay.asi` and `h2_stats_overlay.ini` into the Contracts `scripts` directory instead (for the Steam release, `<Steam>\steamapps\common\Hitman Contracts\scripts`).

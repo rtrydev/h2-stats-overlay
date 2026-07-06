@@ -10,8 +10,6 @@
 #include <cstdio>
 #include <cstring>
 
-// Hitman: Contracts memory layout. Offsets are ported from the HitmanStatistics
-// reference project and are experimental — see README "Compatibility".
 namespace h2stats {
 namespace {
 
