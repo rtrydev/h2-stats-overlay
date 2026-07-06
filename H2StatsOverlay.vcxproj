@@ -72,6 +72,10 @@
     <ClCompile Include="src\config.cpp" />
     <ClCompile Include="src\d3d8_hook.cpp" />
     <ClCompile Include="src\dllmain.cpp" />
+    <ClCompile Include="src\game_common.cpp" />
+    <ClCompile Include="src\game_contracts.cpp" />
+    <ClCompile Include="src\game_detect.cpp" />
+    <ClCompile Include="src\game_hitman2.cpp" />
     <ClCompile Include="src\log.cpp" />
     <ClCompile Include="src\overlay_renderer.cpp" />
     <ClCompile Include="src\rating_logic.cpp" />
@@ -81,7 +85,10 @@
     <ClInclude Include="src\config.h" />
     <ClInclude Include="src\d3d8_hook.h" />
     <ClInclude Include="src\d3d8_min.h" />
+    <ClInclude Include="src\game_detect.h" />
+    <ClInclude Include="src\game_reader.h" />
     <ClInclude Include="src\log.h" />
+    <ClInclude Include="src\mem_read.h" />
     <ClInclude Include="src\overlay_renderer.h" />
     <ClInclude Include="src\rating_logic.h" />
     <ClInclude Include="src\stats_reader.h" />
