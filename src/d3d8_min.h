@@ -11,6 +11,7 @@
 struct IDirect3D8;
 struct IDirect3DDevice8;
 struct IDirect3DBaseTexture8;
+struct IDirect3DVertexBuffer8;
 struct D3DPRESENT_PARAMETERS;
 
 typedef enum _D3DDEVTYPE {

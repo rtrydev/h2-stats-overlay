@@ -18,16 +18,21 @@ struct Vertex {
     DWORD color;
 };
 
-using CreateStateBlockFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, D3DSTATEBLOCKTYPE, DWORD*);
-using ApplyStateBlockFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, DWORD);
-using DeleteStateBlockFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, DWORD);
 using SetRenderStateFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, D3DRENDERSTATETYPE, DWORD);
+using GetRenderStateFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, D3DRENDERSTATETYPE, DWORD*);
 using SetTextureFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, DWORD, IDirect3DBaseTexture8*);
+using GetTextureFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, DWORD, IDirect3DBaseTexture8**);
 using SetTextureStageStateFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, DWORD, D3DTEXTURESTAGESTATETYPE, DWORD);
+using GetTextureStageStateFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, DWORD, D3DTEXTURESTAGESTATETYPE, DWORD*);
 using SetVertexShaderFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, DWORD);
+using GetVertexShaderFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, DWORD*);
 using SetPixelShaderFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, DWORD);
+using GetPixelShaderFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, DWORD*);
+using SetStreamSourceFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, UINT, IDirect3DVertexBuffer8*, UINT);
+using GetStreamSourceFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, UINT, IDirect3DVertexBuffer8**, UINT*);
 using GetViewportFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, D3DVIEWPORT8*);
 using DrawPrimitiveUPFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice8*, D3DPRIMITIVETYPE, UINT, const void*, UINT);
+using ReleaseFn = ULONG(STDMETHODCALLTYPE*)(void*);
 
 constexpr DWORD kGreen = 0xFF00D060;
 constexpr DWORD kRed = 0xFFE04040;
@@ -428,14 +433,67 @@ float AddText(std::vector<Vertex>& vertices, const char* text, float x, float y,
     return cursorX - x;
 }
 
-bool PrepareDeviceState(IDirect3DDevice8* device, DWORD& stateBlock) {
-    stateBlock = 0;
-    const auto createStateBlock = VTable<CreateStateBlockFn>(device, 57);
-    if (createStateBlock != nullptr && SUCCEEDED(createStateBlock(device, D3DSBT_ALL, &stateBlock))) {
-        return true;
-    }
+// Exactly the device state the overlay touches. This used to be a
+// CreateStateBlock(D3DSBT_ALL) capture/apply/delete every frame, but under
+// wined3d that snapshots and replays the ENTIRE device state (hundreds of
+// states, transforms, lights) each frame — measurable main-thread cost on
+// CrossOver. Saving and restoring only what ApplyOverlayState changes (plus
+// stream 0, which DrawPrimitiveUP invalidates) draws the same pixels for a
+// fraction of the work.
+constexpr D3DRENDERSTATETYPE kSavedRenderStates[] = {
+    D3DRS_LIGHTING,
+    D3DRS_ZENABLE,
+    D3DRS_ZWRITEENABLE,
+    D3DRS_CULLMODE,
+    D3DRS_ALPHABLENDENABLE,
+    D3DRS_SRCBLEND,
+    D3DRS_DESTBLEND,
+};
+constexpr size_t kSavedRenderStateCount = sizeof(kSavedRenderStates) / sizeof(kSavedRenderStates[0]);
 
-    return false;
+constexpr D3DTEXTURESTAGESTATETYPE kSavedStageStates[] = {
+    D3DTSS_COLOROP,
+    D3DTSS_COLORARG1,
+    D3DTSS_ALPHAOP,
+    D3DTSS_ALPHAARG1,
+};
+constexpr size_t kSavedStageStateCount = sizeof(kSavedStageStates) / sizeof(kSavedStageStates[0]);
+
+struct SavedState {
+    DWORD renderStates[kSavedRenderStateCount];
+    DWORD stageStates[kSavedStageStateCount];
+    IDirect3DBaseTexture8* texture;    // AddRef'd by GetTexture
+    IDirect3DVertexBuffer8* stream0;   // AddRef'd by GetStreamSource
+    UINT stream0Stride;
+    DWORD vertexShader;
+    DWORD pixelShader;
+};
+
+void ReleaseInterface(void* object) {
+    if (object != nullptr) {
+        void** table = *reinterpret_cast<void***>(object);
+        reinterpret_cast<ReleaseFn>(table[2])(object);
+    }
+}
+
+void SaveDeviceState(IDirect3DDevice8* device, SavedState& saved) {
+    const auto getRenderState = VTable<GetRenderStateFn>(device, 51);
+    const auto getTexture = VTable<GetTextureFn>(device, 60);
+    const auto getTextureStageState = VTable<GetTextureStageStateFn>(device, 62);
+    const auto getVertexShader = VTable<GetVertexShaderFn>(device, 77);
+    const auto getPixelShader = VTable<GetPixelShaderFn>(device, 89);
+    const auto getStreamSource = VTable<GetStreamSourceFn>(device, 84);
+
+    for (size_t index = 0; index < kSavedRenderStateCount; ++index) {
+        getRenderState(device, kSavedRenderStates[index], &saved.renderStates[index]);
+    }
+    for (size_t index = 0; index < kSavedStageStateCount; ++index) {
+        getTextureStageState(device, 0, kSavedStageStates[index], &saved.stageStates[index]);
+    }
+    getTexture(device, 0, &saved.texture);
+    getStreamSource(device, 0, &saved.stream0, &saved.stream0Stride);
+    getVertexShader(device, &saved.vertexShader);
+    getPixelShader(device, &saved.pixelShader);
 }
 
 void ApplyOverlayState(IDirect3DDevice8* device) {
@@ -462,15 +520,30 @@ void ApplyOverlayState(IDirect3DDevice8* device) {
     setVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
 }
 
-void RestoreDeviceState(IDirect3DDevice8* device, DWORD stateBlock) {
-    if (stateBlock == 0) {
-        return;
-    }
+void RestoreDeviceState(IDirect3DDevice8* device, SavedState& saved) {
+    const auto setRenderState = VTable<SetRenderStateFn>(device, 50);
+    const auto setTexture = VTable<SetTextureFn>(device, 61);
+    const auto setTextureStageState = VTable<SetTextureStageStateFn>(device, 63);
+    const auto setVertexShader = VTable<SetVertexShaderFn>(device, 76);
+    const auto setPixelShader = VTable<SetPixelShaderFn>(device, 88);
+    const auto setStreamSource = VTable<SetStreamSourceFn>(device, 83);
 
-    const auto applyStateBlock = VTable<ApplyStateBlockFn>(device, 54);
-    const auto deleteStateBlock = VTable<DeleteStateBlockFn>(device, 56);
-    applyStateBlock(device, stateBlock);
-    deleteStateBlock(device, stateBlock);
+    for (size_t index = 0; index < kSavedRenderStateCount; ++index) {
+        setRenderState(device, kSavedRenderStates[index], saved.renderStates[index]);
+    }
+    for (size_t index = 0; index < kSavedStageStateCount; ++index) {
+        setTextureStageState(device, 0, kSavedStageStates[index], saved.stageStates[index]);
+    }
+    setTexture(device, 0, saved.texture);
+    setStreamSource(device, 0, saved.stream0, saved.stream0Stride);
+    setVertexShader(device, saved.vertexShader);
+    setPixelShader(device, saved.pixelShader);
+
+    // The Get* calls handed back AddRef'd interfaces.
+    ReleaseInterface(saved.texture);
+    ReleaseInterface(saved.stream0);
+    saved.texture = nullptr;
+    saved.stream0 = nullptr;
 }
 
 void DrawVertices(IDirect3DDevice8* device, const std::vector<Vertex>& vertices) {
@@ -594,11 +667,11 @@ void Render(IDirect3DDevice8* device) {
         AddMetricLine(vertices, x, detailsY, detailsScale, "INNOCENTS HARMED", snapshot.counters.innocentsHarmed);
     }
 
-    DWORD stateBlock = 0;
-    PrepareDeviceState(device, stateBlock);
+    SavedState saved = {};
+    SaveDeviceState(device, saved);
     ApplyOverlayState(device);
     DrawVertices(device, vertices);
-    RestoreDeviceState(device, stateBlock);
+    RestoreDeviceState(device, saved);
 }
 
 } // namespace h2stats::OverlayRenderer
