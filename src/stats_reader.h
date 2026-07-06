@@ -15,6 +15,9 @@ struct StatCounters {
 
 struct StatsSnapshot {
     bool missionStarted = false;
+    // When true, a single close encounter fails Silent Assassin (Contracts'
+    // "Asylum Aftermath" is the only mission with this stricter rule).
+    bool strictCloseEncounter = false;
     int missionNumber = 0;
     int missionTime = 0;
     char missionKey[9] = {};

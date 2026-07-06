@@ -1,14 +1,19 @@
 #include "stats_reader.h"
 
+#include "config.h"
 #include "log.h"
 
 #include <windows.h>
 
+#include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 namespace h2stats::StatsReader {
 namespace {
+
+enum class Game { Unknown, Hitman2, Contracts };
 
 constexpr uintptr_t kPreferredBaseAddress = 0x00400000;
 
@@ -36,13 +41,68 @@ constexpr int kStatPlayerEntityId = 0x94;
 constexpr int kPlayerShotsFired = 0x11C7;
 constexpr int kPlayerCloseEncounters = 0x11CB;
 
+// Contracts reads most counters through short pointer chains anchored at these
+// module-relative globals.
+constexpr int kHcTimerRva = 0x39457C;      // -> [+0x24], float, 1/60s units
+constexpr int kHcShotsRva = 0x3947B0;      // -> [+0xBA0][+0x104][+0x82F]
+constexpr int kHcStatsRva = 0x3947C0;      // -> [+<per-stat offset>]
+
+constexpr int kHcCloseEncounters = 0xB2F;
+constexpr int kHcHeadshots = 0xB17;
+constexpr int kHcAlerts = 0xB2B;
+constexpr int kHcEnemiesKilled = 0xB1F;
+constexpr int kHcEnemiesHarmed = 0xB1B;
+constexpr int kHcInnocentsKilled = 0xB27;
+constexpr int kHcInnocentsHarmed = 0xB23;
+
 struct MissionInfo {
     const char key[9];
     const char* name;
     int number;
 };
 
-constexpr MissionInfo kMissions[] = {
+// The Contracts mission-name pointer was never pinned down upstream, so the
+// level id is searched for across these candidate chains (module-relative
+// address + deref offsets), cycling until one resolves to a known level id.
+struct HcPointerChain {
+    int rva;
+    int offsets[5];
+    int count;
+};
+
+constexpr HcPointerChain kContractsMapPointers[] = {
+    {0x393D58, {0x234, 0xBDE}, 2},
+    {0x394598, {0x10, 0x194, 0xC0E}, 3},
+    {0x394598, {0x214, 0xC0E}, 2},
+    {0x394578, {0x1EC0, 0x49FA}, 2},
+    {0x394578, {0x1E00, 0xBC, 0x49FA}, 3},
+    {0x394578, {0x1D80, 0x7C, 0xBC, 0x49FA}, 4},
+    {0x394578, {0x1D00, 0x7C, 0x7C, 0xBC, 0x49FA}, 5},
+    {0x39457C, {0x1E40, 0x49FA}, 2},
+    {0x39457C, {0x1D80, 0xBC, 0x49FA}, 3},
+    {0x39457C, {0x1D00, 0x7C, 0xBC, 0x49FA}, 4},
+    {0x39457C, {0x1C80, 0x7C, 0x7C, 0xBC, 0x49FA}, 5},
+};
+
+constexpr int kContractsMapPointerCount =
+    static_cast<int>(sizeof(kContractsMapPointers) / sizeof(kContractsMapPointers[0]));
+
+constexpr MissionInfo kMissionsContracts[] = {
+    {"C01-1_MA", "Asylum Aftermath", 1},
+    {"C01-2_MA", "The Meat King's Party", 2},
+    {"C02-1_MA", "The Bjarkhov Bomb", 3},
+    {"C03-1_MA", "Beldingford Manor", 4},
+    {"C06-1_MA", "Rendezvous in Rotterdam", 5},
+    {"C06-2_MA", "Deadly Cargo", 6},
+    {"C07-1_MA", "Traditions of the Trade", 7},
+    {"C08-1_MA", "Slaying a Dragon", 8},
+    {"C08-2_MA", "The Wang Fou Incident", 9},
+    {"C08-3_MA", "The Seafood Massacre", 10},
+    {"C08-4_MA", "Lee Hong Assassination", 11},
+    {"C09-1_MA", "Hunter and Hunted", 12},
+};
+
+constexpr MissionInfo kMissionsHitman2[] = {
     {"C1-1__MA", "Anathema", 1},
     {"C2-1__MA", "St. Petersburg Stakeout", 2},
     {"C2-2__MA", "Kirov Park Meeting", 3},
@@ -68,6 +128,10 @@ constexpr MissionInfo kMissions[] = {
 DWORD g_lastReadFailureLogTick = 0;
 DWORD g_lastDegradedReadLogTick = 0;
 char g_lastMissionKey[9] = {};
+
+Game g_game = Game::Unknown;
+bool g_gameResolved = false;
+int g_hcPointerIndex = 0;
 
 uintptr_t GameBase() {
     const HMODULE exe = GetModuleHandleA(nullptr);
@@ -112,13 +176,65 @@ bool ReadPointerValue(uintptr_t address, const int* offsets, size_t offsetCount,
     return ReadValue(resolvedAddress, value);
 }
 
-const MissionInfo* FindMission(const char* key) {
-    for (const MissionInfo& mission : kMissions) {
-        if (memcmp(key, mission.key, 8) == 0) {
-            return &mission;
+const MissionInfo* FindMission(const char* key, const MissionInfo* table, size_t count) {
+    for (size_t index = 0; index < count; ++index) {
+        if (memcmp(key, table[index].key, 8) == 0) {
+            return &table[index];
         }
     }
     return nullptr;
+}
+
+// Detects which game the plugin was injected into from the host executable
+// name. Cached after the first call; unrecognized executables fall back to the
+// original Hitman 2 behaviour.
+Game DetectGame() {
+    char path[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameA(nullptr, path, sizeof(path));
+    if (length == 0 || length >= sizeof(path)) {
+        return Game::Unknown;
+    }
+
+    const char* fileName = path;
+    for (const char* cursor = path; *cursor != '\0'; ++cursor) {
+        if (*cursor == '\\' || *cursor == '/') {
+            fileName = cursor + 1;
+        }
+    }
+
+    char lowered[MAX_PATH] = {};
+    size_t index = 0;
+    for (; fileName[index] != '\0' && index < sizeof(lowered) - 1; ++index) {
+        lowered[index] = static_cast<char>(std::tolower(static_cast<unsigned char>(fileName[index])));
+    }
+    lowered[index] = '\0';
+
+    if (strstr(lowered, "contracts") != nullptr || strstr(lowered, "hitman3") != nullptr) {
+        return Game::Contracts;
+    }
+    if (strstr(lowered, "hitman2") != nullptr) {
+        return Game::Hitman2;
+    }
+    return Game::Unknown;
+}
+
+Game ResolveGame() {
+    if (!g_gameResolved) {
+        g_gameResolved = true;
+        g_game = DetectGame();
+        switch (g_game) {
+        case Game::Contracts:
+            Log::Write("Game detected: Hitman: Contracts");
+            break;
+        case Game::Hitman2:
+            Log::Write("Game detected: Hitman 2: Silent Assassin");
+            break;
+        default:
+            Log::Write("Host executable not recognized; using Hitman 2 offsets");
+            break;
+        }
+    }
+    return g_game;
 }
 
 bool IsAllZeroKey(const char* key) {
@@ -231,13 +347,7 @@ bool ResolvePlayerEntity(uintptr_t base, int missionNumber, uintptr_t& entity) {
     return true;
 }
 
-} // namespace
-
-void ReadSnapshot(StatsSnapshot& snapshot) {
-    snapshot = StatsSnapshot{};
-
-    const uintptr_t base = GameBase();
-
+void ReadSnapshotHitman2(StatsSnapshot& snapshot, uintptr_t base) {
     uint64_t rawMissionKey = 0;
     const int missionOffsets[] = {0x98, 0xBC7};
     if (!ReadPointerValue(base + 0x2A6C5C,
@@ -255,7 +365,8 @@ void ReadSnapshot(StatsSnapshot& snapshot) {
         return;
     }
 
-    const MissionInfo* mission = FindMission(snapshot.missionKey);
+    const MissionInfo* mission = FindMission(snapshot.missionKey, kMissionsHitman2,
+                                             sizeof(kMissionsHitman2) / sizeof(kMissionsHitman2[0]));
     if (mission == nullptr) {
         return;
     }
@@ -308,6 +419,132 @@ void ReadSnapshot(StatsSnapshot& snapshot) {
     }
 
     snapshot.missionStarted = true;
+}
+
+void ReadHcCounter(uintptr_t base, int statOffset, const char* name, int& value) {
+    const int offsets[] = {statOffset};
+    if (ReadPointerValue(base + kHcStatsRva, offsets, 1, value)) {
+        return;
+    }
+    value = 0;
+    LogDegradedRead(name);
+}
+
+// Diagnostic: log a window of the Contracts stat block so each counter's true
+// offset can be mapped by watching which value changes after a known action.
+// Enabled with [Debug] DumpStats=1. Throttled to once per second.
+void LogContractsStatDump(uintptr_t base, float rawTimerSeconds) {
+    static DWORD lastTick = 0;
+    const DWORD now = GetTickCount();
+    if (now - lastTick < 1000) {
+        return;
+    }
+    lastTick = now;
+
+    uint32_t structBase = 0;
+    if (!ReadValue(base + kHcStatsRva, structBase) || structBase == 0) {
+        return;
+    }
+
+    char line[384];
+    int pos = snprintf(line, sizeof(line), "HC stat dump timer=%.3f [+0x3947C0]->%08X:",
+                       rawTimerSeconds, structBase);
+    for (int off = 0xB03; off <= 0xB4F && pos > 0 && pos < static_cast<int>(sizeof(line)) - 20; off += 4) {
+        int value = 0;
+        ReadValue(static_cast<uintptr_t>(structBase) + static_cast<uintptr_t>(off), value);
+        pos += snprintf(line + pos, sizeof(line) - pos, " %X=%d", off, value);
+    }
+    Log::Write("%s", line);
+}
+
+void ReadSnapshotContracts(StatsSnapshot& snapshot, uintptr_t base) {
+    // The mission-name pointer is unknown, so try one candidate chain per tick.
+    // A candidate that resolves to a known level id is kept (g_hcPointerIndex is
+    // left untouched); otherwise the search advances to the next candidate.
+    const HcPointerChain& candidate = kContractsMapPointers[g_hcPointerIndex];
+    uint64_t rawMissionKey = 0;
+    if (!ReadPointerValue(base + candidate.rva, candidate.offsets, candidate.count, rawMissionKey)) {
+        g_hcPointerIndex = (g_hcPointerIndex + 1) % kContractsMapPointerCount;
+        LogReadFailure("mission key");
+        return;
+    }
+
+    memcpy(snapshot.missionKey, &rawMissionKey, 8);
+    snapshot.missionKey[8] = '\0';
+
+    const MissionInfo* mission = FindMission(snapshot.missionKey, kMissionsContracts,
+                                             sizeof(kMissionsContracts) / sizeof(kMissionsContracts[0]));
+    if (mission == nullptr) {
+        // Either between missions or this candidate isn't the level id pointer.
+        g_hcPointerIndex = (g_hcPointerIndex + 1) % kContractsMapPointerCount;
+        snapshot.missionKey[0] = '\0';
+        return;
+    }
+
+    snapshot.missionNumber = mission->number;
+    strcpy_s(snapshot.missionName, mission->name);
+    // "Asylum Aftermath" (#1) fails SA on any close encounter.
+    snapshot.strictCloseEncounter = mission->number == 1;
+
+    if (memcmp(g_lastMissionKey, snapshot.missionKey, 8) != 0) {
+        memcpy(g_lastMissionKey, snapshot.missionKey, 9);
+        Log::Write("Mission detected: #%d %s (%s)", snapshot.missionNumber, snapshot.missionName, snapshot.missionKey);
+    }
+
+    float missionTime = 0.0f;
+    const int timeOffsets[] = {0x24};
+    if (!ReadPointerValue(base + kHcTimerRva, timeOffsets, 1, missionTime)) {
+        LogReadFailure("mission time");
+        return;
+    }
+
+    if (!(missionTime > 0.0f)) {
+        return;
+    }
+    // Contracts stores the mission timer as seconds (float); the overlay's
+    // FormatTimer works in 1/60s ticks like Hitman 2, so scale it up.
+    snapshot.missionTime = static_cast<int>(missionTime * 60.0f);
+
+    ReadHcCounter(base, kHcCloseEncounters, "close encounters", snapshot.counters.closeEncounters);
+    ReadHcCounter(base, kHcHeadshots, "headshots", snapshot.counters.headshots);
+    ReadHcCounter(base, kHcAlerts, "alerts", snapshot.counters.alerts);
+    ReadHcCounter(base, kHcEnemiesKilled, "enemies killed", snapshot.counters.enemiesKilled);
+    ReadHcCounter(base, kHcEnemiesHarmed, "enemies harmed", snapshot.counters.enemiesHarmed);
+    ReadHcCounter(base, kHcInnocentsKilled, "innocents killed", snapshot.counters.innocentsKilled);
+    ReadHcCounter(base, kHcInnocentsHarmed, "innocents harmed", snapshot.counters.innocentsHarmed);
+
+    int shots = 0;
+    const int shotOffsets[] = {0xBA0, 0x104, 0x82F};
+    if (ReadPointerValue(base + kHcShotsRva, shotOffsets, sizeof(shotOffsets) / sizeof(shotOffsets[0]), shots) &&
+        shots >= 0 && shots < 100000) {
+        snapshot.counters.shotsFired = shots;
+    } else {
+        LogDegradedRead("shots fired");
+    }
+
+    if (Config::Get().dumpStats) {
+        LogContractsStatDump(base, missionTime);
+    }
+
+    snapshot.missionStarted = true;
+}
+
+} // namespace
+
+void ReadSnapshot(StatsSnapshot& snapshot) {
+    snapshot = StatsSnapshot{};
+
+    const uintptr_t base = GameBase();
+
+    switch (ResolveGame()) {
+    case Game::Contracts:
+        ReadSnapshotContracts(snapshot, base);
+        break;
+    case Game::Hitman2:
+    default:
+        ReadSnapshotHitman2(snapshot, base);
+        break;
+    }
 }
 
 } // namespace h2stats::StatsReader

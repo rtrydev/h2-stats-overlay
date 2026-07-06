@@ -126,67 +126,110 @@ bool IsTargetImport(const char* moduleName) {
     return _stricmp(moduleName, "d3d8.dll") == 0;
 }
 
-bool PatchModuleImports(HMODULE module) {
+// Toolhelp can hand back module entries whose base is not actually mapped
+// (observed under Wine: stale/phantom entries), and dereferencing them would
+// page-fault. VirtualQuery never faults, so use it to confirm a range is
+// committed and readable before touching it. This replaces the MSVC-only SEH
+// guard on compilers that lack it (MinGW/clang used for cross-compiling).
+bool IsReadable(const void* address, size_t size) {
+    if (address == nullptr || size == 0) {
+        return false;
+    }
+    const uint8_t* cursor = reinterpret_cast<const uint8_t*>(address);
+    const uint8_t* end = cursor + size;
+    while (cursor < end) {
+        MEMORY_BASIC_INFORMATION info = {};
+        if (VirtualQuery(cursor, &info, sizeof(info)) == 0 || info.State != MEM_COMMIT) {
+            return false;
+        }
+        constexpr DWORD readableProtect = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                          PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        if ((info.Protect & readableProtect) == 0 || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+            return false;
+        }
+        cursor = reinterpret_cast<const uint8_t*>(info.BaseAddress) + info.RegionSize;
+    }
+    return true;
+}
+
+bool PatchModuleImportsUnguarded(HMODULE module) {
     bool patched = false;
 
-    __try {
-        auto* base = reinterpret_cast<uint8_t*>(module);
-        auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-            return false;
-        }
-
-        auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE ||
-            nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT) {
-            return false;
-        }
-
-        const IMAGE_DATA_DIRECTORY& importDirectory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-        if (importDirectory.VirtualAddress == 0) {
-            return false;
-        }
-
-        auto* importDescriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + importDirectory.VirtualAddress);
-        for (; importDescriptor->Name != 0; ++importDescriptor) {
-            const char* importedModuleName = reinterpret_cast<const char*>(base + importDescriptor->Name);
-            if (!IsTargetImport(importedModuleName)) {
-                continue;
-            }
-
-            if (importDescriptor->OriginalFirstThunk == 0 || importDescriptor->FirstThunk == 0) {
-                continue;
-            }
-
-            auto* originalThunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + importDescriptor->OriginalFirstThunk);
-            auto* firstThunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + importDescriptor->FirstThunk);
-            for (; originalThunk->u1.AddressOfData != 0; ++originalThunk, ++firstThunk) {
-                if (IMAGE_SNAP_BY_ORDINAL(originalThunk->u1.Ordinal)) {
-                    continue;
-                }
-
-                auto* importByName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + originalThunk->u1.AddressOfData);
-                if (strcmp(reinterpret_cast<const char*>(importByName->Name), "Direct3DCreate8") != 0) {
-                    continue;
-                }
-
-                auto** functionSlot = reinterpret_cast<void**>(&firstThunk->u1.Function);
-                void* original = reinterpret_cast<void*>(firstThunk->u1.Function);
-                if (original != reinterpret_cast<void*>(&HookedDirect3DCreate8)) {
-                    if (g_originalDirect3DCreate8 == nullptr) {
-                        g_originalDirect3DCreate8 = reinterpret_cast<Direct3DCreate8Fn>(original);
-                    }
-                    if (PatchPointer(functionSlot, reinterpret_cast<void*>(&HookedDirect3DCreate8), nullptr)) {
-                        patched = true;
-                    }
-                }
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    auto* base = reinterpret_cast<uint8_t*>(module);
+    if (!IsReadable(base, sizeof(IMAGE_DOS_HEADER))) {
+        return false;
+    }
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
         return false;
     }
 
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (!IsReadable(nt, sizeof(IMAGE_NT_HEADERS))) {
+        return false;
+    }
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT) {
+        return false;
+    }
+
+    const IMAGE_DATA_DIRECTORY& importDirectory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (importDirectory.VirtualAddress == 0) {
+        return false;
+    }
+
+    auto* importDescriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + importDirectory.VirtualAddress);
+    for (; importDescriptor->Name != 0; ++importDescriptor) {
+        const char* importedModuleName = reinterpret_cast<const char*>(base + importDescriptor->Name);
+        if (!IsTargetImport(importedModuleName)) {
+            continue;
+        }
+
+        if (importDescriptor->OriginalFirstThunk == 0 || importDescriptor->FirstThunk == 0) {
+            continue;
+        }
+
+        auto* originalThunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + importDescriptor->OriginalFirstThunk);
+        auto* firstThunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + importDescriptor->FirstThunk);
+        for (; originalThunk->u1.AddressOfData != 0; ++originalThunk, ++firstThunk) {
+            if (IMAGE_SNAP_BY_ORDINAL(originalThunk->u1.Ordinal)) {
+                continue;
+            }
+
+            auto* importByName = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + originalThunk->u1.AddressOfData);
+            if (strcmp(reinterpret_cast<const char*>(importByName->Name), "Direct3DCreate8") != 0) {
+                continue;
+            }
+
+            auto** functionSlot = reinterpret_cast<void**>(&firstThunk->u1.Function);
+            void* original = reinterpret_cast<void*>(firstThunk->u1.Function);
+            if (original != reinterpret_cast<void*>(&HookedDirect3DCreate8)) {
+                if (g_originalDirect3DCreate8 == nullptr) {
+                    g_originalDirect3DCreate8 = reinterpret_cast<Direct3DCreate8Fn>(original);
+                }
+                if (PatchPointer(functionSlot, reinterpret_cast<void*>(&HookedDirect3DCreate8), nullptr)) {
+                    patched = true;
+                }
+            }
+        }
+    }
+
     return patched;
+}
+
+// Walking another module's PE headers can touch unmapped pages, so guard it
+// with SEH under MSVC. MinGW/clang (used for cross-compiling) lack this SEH
+// form; there the walk runs unguarded, which is safe for genuine loaded modules.
+bool PatchModuleImports(HMODULE module) {
+#if defined(_MSC_VER)
+    __try {
+        return PatchModuleImportsUnguarded(module);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+#else
+    return PatchModuleImportsUnguarded(module);
+#endif
 }
 
 void HookDevice(IDirect3DDevice8* device) {

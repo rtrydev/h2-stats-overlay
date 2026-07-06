@@ -392,10 +392,25 @@ void AddRectangle(std::vector<Vertex>& vertices, float x, float y, float w, floa
 void AddGlyph(std::vector<Vertex>& vertices, char glyph, float x, float y, float cell, DWORD color) {
     for (int row = 0; row < 7; ++row) {
         const char* rowData = GlyphRows(glyph, row);
-        for (int col = 0; col < 5; ++col) {
-            if (rowData[col] == '1') {
-                AddRectangle(vertices, x + static_cast<float>(col) * cell, y + static_cast<float>(row) * cell, cell, cell, color);
+        // Merge each horizontal run of lit cells into one rectangle. This draws
+        // the exact same pixels with far fewer triangles than a quad per cell.
+        int col = 0;
+        while (col < 5) {
+            if (rowData[col] != '1') {
+                ++col;
+                continue;
             }
+            const int runStart = col;
+            while (col < 5 && rowData[col] == '1') {
+                ++col;
+            }
+            const int runLength = col - runStart;
+            AddRectangle(vertices,
+                         x + static_cast<float>(runStart) * cell,
+                         y + static_cast<float>(row) * cell,
+                         static_cast<float>(runLength) * cell,
+                         cell,
+                         color);
         }
     }
 }
@@ -529,7 +544,7 @@ void Render(IDirect3DDevice8* device) {
         return;
     }
 
-    const bool silentAssassin = snapshot.missionStarted ? RatingLogic::IsSilentAssassin(snapshot.counters) : true;
+    const bool silentAssassin = snapshot.missionStarted ? RatingLogic::IsSilentAssassin(snapshot.counters, snapshot.strictCloseEncounter) : true;
     const bool allZeros = snapshot.missionStarted ? RatingLogic::IsAllZeros(snapshot.counters) : true;
 
     D3DVIEWPORT8 viewport = {};
@@ -543,8 +558,9 @@ void Render(IDirect3DDevice8* device) {
     const float scale = config.scale;
     const float lineSpacing = static_cast<float>(config.lineSpacing);
 
-    std::vector<Vertex> vertices;
-    vertices.reserve(4096);
+    // Reused across frames so the vertex storage is not reallocated every frame.
+    static std::vector<Vertex> vertices;
+    vertices.clear();
 
     AddOutlinedText(vertices, "SA", x, y, scale, silentAssassin ? kGreen : kRed);
     AddOutlinedText(vertices, "AZ", x, y + lineSpacing, scale, allZeros ? kGreen : kRed);

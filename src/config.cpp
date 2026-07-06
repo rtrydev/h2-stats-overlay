@@ -29,7 +29,8 @@ constexpr const char* kDefaultIni =
     "VerboseLineSpacing=12\r\n"
     "\r\n"
     "[Debug]\r\n"
-    "Log=1\r\n";
+    "Log=1\r\n"
+    "DumpStats=0\r\n";
 
 void AppendPath(char* target, size_t targetSize, const char* dir, const char* file) {
     strcpy_s(target, targetSize, dir);
@@ -92,6 +93,7 @@ void LoadLocked(bool announce) {
     loaded.verboseScale = ReadFloat("Overlay", "VerboseScale", 0.75f);
     loaded.verboseLineSpacing = GetPrivateProfileIntA("Overlay", "VerboseLineSpacing", 12, g_configPath);
     loaded.debugLog = GetPrivateProfileIntA("Debug", "Log", 1, g_configPath) != 0;
+    loaded.dumpStats = GetPrivateProfileIntA("Debug", "DumpStats", 0, g_configPath) != 0;
 
     if (loaded.scale < 0.5f) {
         loaded.scale = 0.5f;
