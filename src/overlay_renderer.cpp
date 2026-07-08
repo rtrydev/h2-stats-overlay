@@ -635,10 +635,12 @@ void Render(IDirect3DDevice8* device) {
     static std::vector<Vertex> vertices;
     vertices.clear();
 
+    // "SA" and "AZ" share a row; offset AZ by the width of "SA" plus half a glyph advance.
+    const float indicatorCell = std::max(1.0f, 2.0f * scale);
     AddOutlinedText(vertices, "SA", x, y, scale, silentAssassin ? kGreen : kRed);
-    AddOutlinedText(vertices, "AZ", x, y + lineSpacing, scale, allZeros ? kGreen : kRed);
+    AddOutlinedText(vertices, "AZ", x + 2.5f * 6.0f * indicatorCell, y, scale, allZeros ? kGreen : kRed);
 
-    float detailsY = y + lineSpacing * 2.0f;
+    float detailsY = y + lineSpacing;
     const float detailsScale = config.verboseScale;
     const float detailsLineSpacing = static_cast<float>(config.verboseLineSpacing);
 
