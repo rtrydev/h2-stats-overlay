@@ -3,20 +3,17 @@
 namespace h2stats::RatingLogic {
 namespace {
 
-// Hitman 2: Silent Assassin rules:
-//   - One alert allowed; two alerts tolerated when no guard was killed or no
-//     shot was fired.
+// Hitman 2: Silent Assassin rules, matching the community-tested combination
+// table (Forsaken / HitmanSpeedRuns, "Hitman 2 Silent Assassin Rating"):
+//   - One alert allowed, never two (the "two alerts if bodies were only found
+//     unconscious" folklore is not in the tested table).
 //   - One close encounter allowed; an alert plus a close encounter fails.
-//   - At most two shots; a third only when every other counter (including
-//     headshots) is zero.
-//   - One civilian kill allowed; a civilian kill plus a guard kill fails.
-//   - One guard kill allowed; two only when no shots were fired.
+//   - Aggression budget: 2*shots + headshots + 3*enemy kills + enemy harms +
+//     6*civilian kills + 3*civilian harms + close encounters must not exceed
+//     6. Unlike Contracts, shots always count, even into thin air.
 bool IsSilentAssassinHitman2(const StatCounters& counters) {
-    // One alert allowed; two only when no guard was killed or no shot fired.
-    if (counters.alerts > 2) {
-        return false;
-    }
-    if (counters.alerts == 2 && counters.enemiesKilled > 0 && counters.shotsFired > 0) {
+    // One alert allowed.
+    if (counters.alerts > 1) {
         return false;
     }
 
@@ -28,51 +25,26 @@ bool IsSilentAssassinHitman2(const StatCounters& counters) {
         return false;
     }
 
-    // Two shots allowed; a third only when every other counter is zero.
-    if (counters.shotsFired > 3) {
-        return false;
-    }
-    if (counters.shotsFired == 3) {
-        const bool everythingElseZero =
-            counters.closeEncounters == 0 &&
-            counters.headshots == 0 &&
-            counters.alerts == 0 &&
-            counters.enemiesKilled == 0 &&
-            counters.enemiesHarmed == 0 &&
-            counters.innocentsKilled == 0 &&
-            counters.innocentsHarmed == 0;
-        if (!everythingElseZero) {
-            return false;
-        }
-    }
-
-    // One civilian kill allowed, but not together with a guard kill.
-    if (counters.innocentsKilled > 1) {
-        return false;
-    }
-    if (counters.innocentsKilled > 0 && counters.enemiesKilled > 0) {
-        return false;
-    }
-
-    // One guard kill allowed; two only when no shots were fired.
-    if (counters.enemiesKilled > 2) {
-        return false;
-    }
-    if (counters.enemiesKilled == 2 && counters.shotsFired > 0) {
-        return false;
-    }
-
-    return true;
+    const int aggression = 2 * counters.shotsFired +
+                           counters.headshots +
+                           3 * counters.enemiesKilled +
+                           counters.enemiesHarmed +
+                           6 * counters.innocentsKilled +
+                           3 * counters.innocentsHarmed +
+                           counters.closeEncounters;
+    return aggression <= 6;
 }
 
-// Hitman: Contracts rules:
+// Hitman: Contracts rules, matching the community-tested combination table
+// (Forsaken / HitmanSpeedRuns, "Hitman Contracts Silent Assassin Rating"):
+//   - Civilians can never be harmed or killed.
 //   - One alert allowed.
 //   - One close encounter allowed; an alert plus a close encounter fails.
-//   - At most one shot if an enemy is killed, at most two if an enemy is
-//     harmed; unlimited shots if only scenery/targets were hit.
-//   - Civilians can never be harmed or killed.
-//   - One enemy kill in most cases; two enemies plus one alert also grants SA
-//     as long as everything else is zero.
+//   - Aggression budget: 2*shots + headshots + 3*kills + harms + close
+//     encounters must not exceed 6. Shots and headshots are free while no
+//     enemy was killed or harmed and there was no close encounter (bullets
+//     into scenery or mission targets don't count; target kills don't
+//     increment the enemy counters).
 //   - strictCloseEncounter ("Asylum Aftermath"): any close encounter fails.
 bool IsSilentAssassinContracts(const StatCounters& counters, bool strictCloseEncounter) {
     // Civilians can never be harmed or killed.
@@ -96,35 +68,19 @@ bool IsSilentAssassinContracts(const StatCounters& counters, bool strictCloseEnc
         return false;
     }
 
-    // Enemy kills: one in most cases; two only alongside a single alert and no
-    // other trace (e.g. an accident double-kill).
-    if (counters.enemiesKilled > 2) {
-        return false;
-    }
-    if (counters.enemiesKilled == 2) {
-        const bool onlyAlertAndKills =
-            counters.alerts == 1 &&
-            counters.shotsFired == 0 &&
-            counters.closeEncounters == 0 &&
-            counters.headshots == 0 &&
-            counters.enemiesHarmed == 0;
-        if (!onlyAlertAndKills) {
-            return false;
-        }
+    // Shots and headshots only start counting once an enemy was killed or
+    // harmed or a close encounter happened.
+    if (counters.enemiesKilled == 0 && counters.enemiesHarmed == 0 &&
+        counters.closeEncounters == 0) {
+        return true;
     }
 
-    // Shots only count against the rating when an enemy was hit.
-    if (counters.enemiesKilled > 0) {
-        if (counters.shotsFired > 1) {
-            return false;
-        }
-    } else if (counters.enemiesHarmed > 0) {
-        if (counters.shotsFired > 2) {
-            return false;
-        }
-    }
-
-    return true;
+    const int aggression = 2 * counters.shotsFired +
+                           counters.headshots +
+                           3 * counters.enemiesKilled +
+                           counters.enemiesHarmed +
+                           counters.closeEncounters;
+    return aggression <= 6;
 }
 
 } // namespace
