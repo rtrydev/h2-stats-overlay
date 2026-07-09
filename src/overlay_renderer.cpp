@@ -617,7 +617,7 @@ void Render(IDirect3DDevice8* device) {
         return;
     }
 
-    const bool silentAssassin = snapshot.missionStarted ? RatingLogic::IsSilentAssassin(snapshot.counters, snapshot.strictCloseEncounter) : true;
+    const bool silentAssassin = snapshot.missionStarted ? RatingLogic::IsSilentAssassin(snapshot) : true;
     const bool allZeros = snapshot.missionStarted ? RatingLogic::IsAllZeros(snapshot.counters) : true;
 
     D3DVIEWPORT8 viewport = {};

@@ -23,30 +23,38 @@ uintptr_t GameBase() {
     return reinterpret_cast<uintptr_t>(exe);
 }
 
+struct ResolvedGame {
+    GameReader* reader = nullptr;
+    Game game = Game::Hitman2;
+};
+
 // Resolves and caches the reader for the detected game on first use.
-GameReader* ResolveReader() {
-    static GameReader* reader = nullptr;
-    static bool resolved = false;
-    if (resolved) {
-        return reader;
+const ResolvedGame& Resolve() {
+    static ResolvedGame resolved;
+    static bool done = false;
+    if (done) {
+        return resolved;
     }
-    resolved = true;
+    done = true;
 
     switch (DetectGame()) {
     case Game::Contracts:
-        reader = CreateContractsReader();
+        resolved.reader = CreateContractsReader();
+        resolved.game = Game::Contracts;
         Log::Write("Game detected: Hitman: Contracts");
         break;
     case Game::Hitman2:
-        reader = CreateHitman2Reader();
+        resolved.reader = CreateHitman2Reader();
+        resolved.game = Game::Hitman2;
         Log::Write("Game detected: Hitman 2: Silent Assassin");
         break;
     default:
-        reader = CreateHitman2Reader();
+        resolved.reader = CreateHitman2Reader();
+        resolved.game = Game::Hitman2;
         Log::Write("Host executable not recognized; using Hitman 2 offsets");
         break;
     }
-    return reader;
+    return resolved;
 }
 
 } // namespace
@@ -54,9 +62,10 @@ GameReader* ResolveReader() {
 void ReadSnapshot(StatsSnapshot& snapshot) {
     snapshot = StatsSnapshot{};
 
-    GameReader* reader = ResolveReader();
-    if (reader != nullptr) {
-        reader->ReadSnapshot(GameBase(), snapshot);
+    const ResolvedGame& resolved = Resolve();
+    snapshot.game = resolved.game;
+    if (resolved.reader != nullptr) {
+        resolved.reader->ReadSnapshot(GameBase(), snapshot);
     }
 }
 

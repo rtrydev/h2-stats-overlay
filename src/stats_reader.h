@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game_detect.h"
+
 namespace h2stats {
 
 struct StatCounters {
@@ -15,6 +17,9 @@ struct StatCounters {
 
 struct StatsSnapshot {
     bool missionStarted = false;
+    // Which game's Silent Assassin rules apply (unrecognized hosts fall back to
+    // the Hitman 2 layout and rules).
+    Game game = Game::Hitman2;
     // When true, a single close encounter fails Silent Assassin (Contracts'
     // "Asylum Aftermath" is the only mission with this stricter rule).
     bool strictCloseEncounter = false;
